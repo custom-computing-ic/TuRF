@@ -1,0 +1,4 @@
+Model Name,# Block Params,# Conv Params,# FC Params,# Block Ops,# Conv Ops,# FC Ops,# Total Params,# Total Ops
+ResNet-50,2.34E+07,9.41E+03,2.05E+06,7.48E+09,2.38E+08,4.10E+06,2.55E+07,7.72E+09
+MobileNetV1,3.18E+06,8.64E+02,1024000,1.11E+09,2.19E+07,2048000,4.21E+06,1.14E+09
+MobileNetV2,1.78E+06,410464,1280000,5.46E+08,62010800,2560000,3.47E+06,6.11E+08

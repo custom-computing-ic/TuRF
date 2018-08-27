@@ -1,0 +1,7 @@
+model_name,group_id,accuracy
+vgg_16_flowers_0_0_0_0_0_finetune,baseline,0.87
+vgg_16_flowers_1_0_0_0_0_finetune,1,0.7
+vgg_16_flowers_0_1_0_0_0_finetune,2,0.665
+vgg_16_flowers_0_0_1_0_0_finetune,3,0.7425
+vgg_16_flowers_0_0_0_1_0_finetune,4,0.82
+vgg_16_flowers_0_0_0_0_1_finetune,5,0.865
