@@ -1,0 +1,84 @@
+package com.custom_computing_ic.maxdeep.kernel.conv2d.lib;
+
+import org.junit.Assert;
+import org.junit.Test;
+
+import com.custom_computing_ic.maxdeep.kernel.conv2d.ConvLayerParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.managers.standard.SimulationManager;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+import com.maxeler.maxcompiler.v2.utils.MathUtils;
+
+public class ConvLayerIfmapBufferTest {
+
+  public class TestKernel extends Kernel {
+    
+    public ConvLayerIfmapBuffer ibuf;
+    
+    TestKernel(KernelParameters params, ConvLayerParameters cp) {
+      super(params);
+
+      DFEType scalarT = dfeUInt(cp.BW);
+
+      ibuf = new ConvLayerIfmapBuffer(getKernel(), cp, scalarT);
+      
+      DFEVar addr = io.input("addr", ibuf.getAddrT());
+      DFEVar writeEn = io.input("writeEn", dfeBool());
+      DFEVector<DFEVar> data = io.input("dataIn", ibuf.getPortVecT());
+      
+      io.output("dataOut", ibuf.getPortVecT())
+        <== ibuf.port(data, addr, writeEn);
+    }
+  }
+  
+  @Test
+  public void testSimple() { test(1, 1); }
+  
+  public void test(int PC, int PK) {
+    ConvLayerParameters params =
+      new ConvLayerParameters.Builder(10, 10, 10, 10, 3).PC(PC).PK(PK).build();
+    
+    int N = 10;
+    int M = 5;
+    
+    SimulationManager mgr =
+      new SimulationManager(String.format("ConvLayerIfmapBufferTest_%d_%d", PC, PK));
+    TestKernel knl = new TestKernel(mgr.makeKernelParameters(), params);
+    mgr.setKernel(knl);
+    mgr.setKernelCycles(N);
+    
+    Assert.assertEquals(PC * PK, knl.ibuf.getWidth());
+    Assert.assertEquals(100 / PK, knl.ibuf.getDepth());
+    
+    Bits[] dataIn = new Bits[N];
+    Bits[] writeEn = new Bits[N];
+    Bits[] addr = new Bits[N];
+    Bits[] dataOut = new Bits[N];
+    
+   
+    for (int i = 0; i < N; i ++) {
+      dataIn[i] = new Bits(PC * PK * params.BW, i);
+	    addr[i] = new Bits(MathUtils.bitsToAddress(knl.ibuf.getDepth()), i % M);
+      if (i < M) {
+        writeEn[i] = new Bits(1, 1);
+        dataOut[i] = dataIn[i];
+      } else {
+        writeEn[i] = new Bits(1, 0);
+        dataOut[i] = dataIn[i % M];
+      }
+    }
+    
+    mgr.setInputDataRaw("dataIn", dataIn);
+    mgr.setInputDataRaw("addr", addr);
+    mgr.setInputDataRaw("writeEn", writeEn);
+    mgr.runTest();
+        
+    
+    Assert.assertArrayEquals(dataOut, mgr.getOutputDataRawArray("dataOut"));
+  }
+
+}

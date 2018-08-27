@@ -1,0 +1,146 @@
+/**
+ * 
+ */
+package com.custom_computing_ic.maxdeep.kernel.conv2d.lib;
+
+import junit.framework.Assert;
+
+import org.junit.Test;
+
+import com.custom_computing_ic.maxdeep.kernel.conv2d.lib.LineBufferKernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+import com.maxeler.maxcompiler.v2.managers.standard.SimulationManager;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+
+/**
+ * @author Ruizhe Zhao
+ * @since 16/06/2017
+ */
+public class LineBufferKernelLibTest {
+
+  private class LineBufferTestKernel extends Kernel {
+    public LineBufferTestKernel(KernelParameters parameters, int maxHeight,
+        int maxWidth, int numPipes) {
+      super(parameters);
+
+      DFEType type = dfeInt(8);
+      DFEVectorType<DFEVar> vecType = new DFEVectorType<DFEVar>(type, numPipes);
+      DFEVectorType<DFEVar> outVecType = new DFEVectorType<DFEVar>(type,
+          maxHeight * numPipes);
+
+      DFEVector<DFEVar> inp = io.input("inp", vecType);
+
+      DFEVar height = io.scalarInput("height", dfeInt(32));
+      DFEVar width = io.scalarInput("width", dfeInt(32));
+      DFEVar capacity = io.scalarInput("capacity", dfeInt(32));
+
+      LineBufferKernel knl = new LineBufferKernel(this, maxHeight,
+          maxWidth, numPipes, type);
+      knl.setInput(inp);
+      knl.setHeight(height);
+      knl.setWidth(width);
+      knl.setCapacity(capacity);
+
+      DFEVector<DFEVar> out = knl.getOutput();
+      io.output("output", out, outVecType, knl.getValid());
+    }
+  }
+
+  private class LineBufferTestData {
+    final Bits[] input;
+    final Bits[] expected;
+    int          height, width, capacity;
+
+    public LineBufferTestData(int height, int width, int capacity) {
+      this.height = height;
+      this.width = width;
+      this.capacity = capacity;
+
+      input = new Bits[capacity];
+      expected = new Bits[getOutputSize() * height];
+      for (int i = 0; i < capacity; i++)
+        input[i] = new Bits(8, i);
+      for (int i = 0; i < getOutputLines(); i++) {
+        for (int j = 0; j < width; j++) {
+          for (int k = 0; k < height; k++) {
+            int inputIdx = (i + k) * width + j;
+            int expectedIdx = (i * width * height) + j * height + k;
+            expected[expectedIdx] = input[inputIdx];
+          }
+        }
+      }
+    }
+
+    public int getOutputLines() {
+      return capacity / width - height + 1;
+    }
+
+    public int getOutputSize() {
+      return getOutputLines() * width;
+    }
+  }
+
+  @Test
+  public void testSingleLine() {
+    test(1, 5, 5, 1);
+  }
+
+  @Test
+  public void testDoubleLines() {
+    test(2, 5, 10, 1);
+  }
+
+  @Test
+  public void testMultipleLines() {
+    test(10, 5, 50, 1);
+  }
+
+  @Test
+  public void testMultipleLinesLargerCapacity() {
+    test(10, 5, 60, 1);
+  }
+
+  // TODO: Add multiple pipes test
+
+  private void test(int height, int width, int capacity, int numPipes) {
+    SimulationManager mgr = new SimulationManager(String.format(
+        "LineBufferKernelLibTest_%d_%d_%d_%d",
+        height,
+        width,
+        capacity,
+        numPipes));
+    LineBufferTestKernel knl = new LineBufferTestKernel(
+        mgr.makeKernelParameters(), height, width, numPipes);
+    LineBufferTestData data = new LineBufferTestData(height, width, capacity);
+
+    mgr.setKernel(knl);
+    mgr.setKernelCycles(capacity);
+    mgr.setScalarInput("height", height);
+    mgr.setScalarInput("width", width);
+    mgr.setScalarInput("capacity", capacity);
+    mgr.setInputDataRaw("inp", data.input);
+    mgr.runTest();
+    // Assert.assertTrue(
+    // "result doesn't match",
+    // data.checkOutput(mgr.getOutputDataRawArray("output")));
+
+    Bits[] result = mgr.getOutputDataRawArray("output");
+    Assert.assertEquals(data.getOutputSize(), result.length);
+    for (int i = 0; i < data.getOutputSize(); i++) {
+      Bits resultPack = result[i];
+      Bits expectedList[] = new Bits[height];
+
+      for (int j = 0; j < height; j++)
+        expectedList[j] = data.expected[i * height + j];
+      Bits expectedPack = expectedList[height - 1];
+      for (int j = height - 2; j >= 0; j--)
+        expectedPack = expectedPack.cat(expectedList[j]);
+      Assert.assertEquals(expectedPack, resultPack);
+    }
+  }
+}

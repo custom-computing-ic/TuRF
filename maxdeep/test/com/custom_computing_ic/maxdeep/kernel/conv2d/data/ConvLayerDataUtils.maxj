@@ -1,0 +1,13 @@
+package com.custom_computing_ic.maxdeep.kernel.conv2d.data;
+
+import com.maxeler.maxcompiler.v2.utils.Bits;
+
+public class ConvLayerDataUtils {
+
+  public static Bits pack(int bitWidth, long[] values) {
+    Bits bits = new Bits(bitWidth, values[values.length - 1]);
+    for (int i = values.length - 2; i >= 0; i--)
+      bits = bits.cat(new Bits(bitWidth, values[i]));
+    return bits;
+  }
+}

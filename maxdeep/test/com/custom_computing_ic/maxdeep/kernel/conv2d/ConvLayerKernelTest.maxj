@@ -1,0 +1,134 @@
+package com.custom_computing_ic.maxdeep.kernel.conv2d;
+
+import org.junit.Assert;
+import org.junit.Test;
+
+import com.custom_computing_ic.maxdeep.kernel.conv2d.ConvLayerParameters.CompSeq;
+import com.custom_computing_ic.maxdeep.kernel.conv2d.data.ConvLayerDataGenerator;
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.managers.standard.SimulationManager;
+
+public class ConvLayerKernelTest {
+
+  public class TestKernel extends Kernel {
+
+    TestKernel(KernelParameters params, ConvLayerParameters cp) {
+      super(params);
+
+      DFEType scalarT = dfeInt(cp.BW);
+
+      ConvLayerKernel conv = new ConvLayerKernel(getKernel(), cp, scalarT);
+      DFEVector<DFEVar> ifmap = io.input(
+          "ifmap", conv.getIfmapVecT(), conv.getIfmapEn());
+      DFEVector<DFEVar> coeff = io.input(
+          "coeff", conv.getCoeffVecT(), conv.getCoeffEn());
+
+      conv.setInputs(ifmap, coeff);
+      DFEVector<DFEVar> ofmap = conv.getOfmap();
+
+      io.output("ofmap", conv.getOfmapVecT(), conv.getOfmapEn()).connect(ofmap);
+    }
+  }
+
+  @Test
+  public void test111() {
+    test(1, 1, 1, CompSeq.CHANNEL_MAJOR);
+  }
+
+  @Test
+  public void test112() {
+    test(1, 1, 2, CompSeq.CHANNEL_MAJOR);
+  }
+
+  @Test
+  public void test121() {
+    test(1, 2, 1, CompSeq.CHANNEL_MAJOR);
+  }
+
+  @Test
+  public void test122() {
+    test(1, 2, 2, CompSeq.CHANNEL_MAJOR);
+  }
+
+  @Test
+  public void test211() {
+    test(2, 1, 1, CompSeq.CHANNEL_MAJOR);
+  }
+
+  @Test
+  public void test212() {
+    test(2, 1, 2, CompSeq.CHANNEL_MAJOR);
+  }
+
+  @Test
+  public void test221() {
+    test(2, 2, 1, CompSeq.CHANNEL_MAJOR);
+  }
+
+  @Test
+  public void test222() {
+    test(2, 2, 2, CompSeq.CHANNEL_MAJOR);
+  }
+
+  @Test
+  public void test111f() {
+    test(1, 1, 1, CompSeq.FILTER_MAJOR);
+  }
+
+  @Test
+  public void test112f() {
+    test(1, 1, 2, CompSeq.FILTER_MAJOR);
+  }
+
+  @Test
+  public void test121f() {
+    test(1, 2, 1, CompSeq.FILTER_MAJOR);
+  }
+
+  @Test
+  public void test122f() {
+    test(1, 2, 2, CompSeq.FILTER_MAJOR);
+  }
+
+  @Test
+  public void test211f() {
+    test(2, 1, 1, CompSeq.FILTER_MAJOR);
+  }
+
+  @Test
+  public void test212f() {
+    test(2, 1, 2, CompSeq.FILTER_MAJOR);
+  }
+
+  @Test
+  public void test221f() {
+    test(2, 2, 1, CompSeq.FILTER_MAJOR);
+  }
+
+  @Test
+  public void test222f() {
+    test(2, 2, 2, CompSeq.FILTER_MAJOR);
+  }
+
+  public void test(int PC, int PF, int PK, CompSeq seq) {
+    SimulationManager mgr = new SimulationManager(String.format(
+        "ConvLayerKernelTest_f%d_c%d_k%d_m%s", PF, PC, PK, seq.name()));
+
+    ConvLayerParameters cp = new ConvLayerParameters.Builder(4, 4, 4, 4, 3)
+        .PK(PK).PF(PF).PC(PC).BW(32).seq(seq).build();
+    TestKernel knl = new TestKernel(mgr.makeKernelParameters(), cp);
+    ConvLayerDataGenerator gen = new ConvLayerDataGenerator(cp);
+    mgr.setKernel(knl);
+    mgr.setKernelCycles(gen.getNumCycles());
+    mgr.setInputDataRaw("ifmap", gen.generateIfmapOrigin());
+    mgr.setInputDataRaw("coeff", gen.generateCoeffOrigin());
+    mgr.runTest();
+
+    Assert.assertArrayEquals(
+        gen.generateOfmap().toArray(), mgr.getOutputDataRawArray("ofmap"));
+  }
+}

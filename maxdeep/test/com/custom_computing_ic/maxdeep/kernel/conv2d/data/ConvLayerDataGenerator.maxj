@@ -1,0 +1,530 @@
+package com.custom_computing_ic.maxdeep.kernel.conv2d.data;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+
+import com.custom_computing_ic.maxdeep.kernel.conv2d.ConvLayerParameters;
+import com.custom_computing_ic.maxdeep.kernel.conv2d.ConvLayerParameters.CompSeq;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+
+/**
+ * Generate data for convolution layer
+ * 
+ * TODO: currently only pixel-major sequence is supported.
+ * 
+ * @author Ruizhe Zhao
+ * 
+ */
+public class ConvLayerDataGenerator {
+
+  private ConvLayerParameters       params;
+  private List<ConvLayerParameters> cps;
+
+  public long[]                     ifmap;
+  public long[]                     coeff;
+  public long[]                     ofmap;
+
+  public List<List<Long>>           ifmapList;
+  public List<List<Long>>           coeffList;
+  public List<Long>                 finalOfmap;
+
+  public ConvLayerDataGenerator(List<ConvLayerParameters> cps) {
+    this.cps = cps;
+
+    Random rand = new Random(42);
+
+    ifmapList = new ArrayList<List<Long>>();
+    coeffList = new ArrayList<List<Long>>();
+
+    // generate data
+    for (int i = 0; i < cps.size(); i++) {
+      List<Long> ifmap = new ArrayList<Long>();
+      List<Long> coeff = new ArrayList<Long>();
+
+      // only generate the first layer's input
+      if (i == 0) {
+        for (int j = 0; j < getIfmapSize(i); j++)
+          ifmap.add(j, rand.nextLong() % 100);
+        ifmapList.add(i, ifmap);
+      }
+
+      for (int j = 0; j < getCoeffSize(i); j++)
+        coeff.add(j, rand.nextLong() % 100);
+
+      coeffList.add(i, coeff);
+    }
+
+    // compute
+    for (int i = 0; i < cps.size(); i++) {
+      List<Long> ofmap = compute(i);
+      if (i != cps.size() - 1)
+        ifmapList.add(i + 1, ofmap);
+      else
+        finalOfmap = ofmap;
+    }
+  }
+
+  private int getIfmapSize(int idx) {
+    ConvLayerParameters cp = cps.get(idx);
+
+    return cp.H * cp.W * cp.C;
+  }
+
+  private int getCoeffSize(int idx) {
+    ConvLayerParameters cp = cps.get(idx);
+
+    return cp.C * cp.F * cp.K * cp.K;
+  }
+
+  private List<Long> compute(int idx) {
+    ConvLayerParameters cp = cps.get(idx);
+
+    int F = cp.F;
+    int H = cp.H;
+    int W = cp.W;
+    int K = cp.K;
+    int C = cp.C;
+
+    List<Long> ifmap = ifmapList.get(idx);
+    List<Long> coeff = coeffList.get(idx);
+    List<Long> ofmap = new ArrayList<Long>();
+
+    for (int f = 0; f < F; f++) {
+      for (int h = 0; h < H - K + 1; h++) {
+        for (int w = 0; w < W - K + 1; w++) {
+          int ofmapIndex = f * (H - K + 1) * (W - K + 1) + h * (W - K + 1) + w;
+
+          ofmap.add(ofmapIndex, (long) 0);
+
+          for (int c = 0; c < C; c++) {
+            long sum = 0;
+
+            for (int kx = 0; kx < K; kx++) {
+              for (int ky = 0; ky < K; ky++) {
+                int ifmapIndex = (c * H * W + (h + kx) * W + (w + ky));
+                int coeffIndex = (f * C * K * K + c * K * K + kx * K + ky);
+
+                sum += ifmap.get(ifmapIndex) * coeff.get(coeffIndex);
+              }
+            }
+
+            ofmap.set(ofmapIndex, sum + ofmap.get(ofmapIndex));
+          }
+        }
+      }
+    }
+
+    return ofmap;
+  }
+
+  public List<Bits> genIfmap(int idx) {
+    ConvLayerParameters cp = cps.get(idx);
+
+    List<Bits> result = new ArrayList<Bits>();
+
+    for (int c = 0; c < cp.C; c += cp.PC) {
+      for (int h = 0; h < cp.H; h++) {
+        for (int w = 0; w < cp.W; w += cp.PK) {
+          long[] payload = new long[cp.PC * cp.PK];
+
+          for (int pc = 0; pc < cp.PC; pc++) {
+            for (int pk = 0; pk < cp.PK; pk++) {
+              int dstIdx = pc * cp.PK + pk;
+              int srcIdx = (c + pc) * cp.H * cp.W + h * cp.W + (w + pk);
+
+              payload[dstIdx] = ifmapList.get(idx).get(srcIdx);
+            }
+          }
+
+          result.add(ConvLayerDataUtils.pack(cp.BW, payload));
+        }
+      }
+    }
+
+    return result;
+  }
+
+  public List<Bits> genCoeff(int idx) {
+    ConvLayerParameters cp = cps.get(idx);
+
+    List<Bits> result = new ArrayList<Bits>();
+
+    if (cp.seq == CompSeq.CHANNEL_MAJOR) {
+      for (int c = 0; c < cp.C; c += cp.PC) {
+        for (int f = 0; f < cp.F; f += cp.PF) {
+          long[] payload = new long[cp.PF * cp.PC * cp.K * cp.K];
+
+          for (int pf = 0; pf < cp.PF; pf++) {
+            for (int pc = 0; pc < cp.PC; pc++) {
+              for (int kx = 0; kx < cp.K; kx++) {
+                for (int ky = 0; ky < cp.K; ky++) {
+                  int srcIdx = ((f + pf) * cp.C * cp.K * cp.K + (c + pc) * cp.K
+                      * cp.K + kx * cp.K + ky);
+                  int dstIdx = (pf * cp.PC * cp.K * cp.K + pc * cp.K * cp.K
+                      + kx * cp.K + ky);
+
+                  payload[dstIdx] = coeffList.get(idx).get(srcIdx);
+                }
+              }
+            }
+          }
+
+          result.add(ConvLayerDataUtils.pack(cp.BW, payload));
+        }
+      }
+    } else if (cp.seq == CompSeq.FILTER_MAJOR) {
+      for (int f = 0; f < cp.F; f += cp.PF) {
+        for (int c = 0; c < cp.C; c += cp.PC) {
+          long[] payload = new long[cp.PF * cp.PC * cp.K * cp.K];
+
+          for (int pf = 0; pf < cp.PF; pf++) {
+            for (int pc = 0; pc < cp.PC; pc++) {
+              for (int kx = 0; kx < cp.K; kx++) {
+                for (int ky = 0; ky < cp.K; ky++) {
+                  int srcIdx = ((f + pf) * cp.C * cp.K * cp.K + (c + pc) * cp.K
+                      * cp.K + kx * cp.K + ky);
+                  int dstIdx = (pf * cp.PC * cp.K * cp.K + pc * cp.K * cp.K
+                      + kx * cp.K + ky);
+
+                  payload[dstIdx] = coeffList.get(idx).get(srcIdx);
+                }
+              }
+            }
+          }
+
+          result.add(ConvLayerDataUtils.pack(cp.BW, payload));
+        }
+      }
+    }
+
+    return result;
+  }
+
+  public List<Bits> genOfmap() {
+    ConvLayerParameters cp = cps.get(cps.size() - 1);
+
+    List<Bits> result = new ArrayList<Bits>();
+
+    for (int f = 0; f < cp.F; f += cp.PF) {
+      for (int h = 0; h < cp.H - cp.K + 1; h++) {
+        for (int w = 0; w < cp.W - cp.K + 1; w += cp.PK) {
+          long[] payload = new long[cp.PF * cp.PK];
+
+          for (int pf = 0; pf < cp.PF; pf++) {
+            for (int pk = 0; pk < cp.PK; pk++) {
+              int srcIdx = ((f + pf) * (cp.H - cp.K + 1) * (cp.W - cp.K + 1)
+                  + h * (cp.W - cp.K + 1) + (w + pk));
+              int dstIdx = pf * cp.PK + pk;
+
+              payload[dstIdx] = finalOfmap.get(srcIdx);
+            }
+          }
+
+          result.add(ConvLayerDataUtils.pack(cp.BW, payload));
+        }
+      }
+    }
+
+    return result;
+
+  }
+
+  public ConvLayerDataGenerator(ConvLayerParameters params) {
+    this.params = params;
+
+    int H = params.H;
+    int W = params.W;
+    int C = params.C;
+    int F = params.F;
+    int K = params.K;
+
+    int ifmapSize = H * W * C;
+    int coeffSize = C * F * K * K;
+    int ofmapSize = (H - K + 1) * (W - K + 1) * F;
+
+    ifmap = new long[ifmapSize];
+    coeff = new long[coeffSize];
+    ofmap = new long[ofmapSize];
+
+    Random rand = new Random(42);
+
+    for (int i = 0; i < ifmapSize; i++)
+      ifmap[i] = rand.nextInt() % 10;
+    for (int i = 0; i < coeffSize; i++)
+      coeff[i] = rand.nextInt() % 10;
+
+    for (int f = 0; f < F; f++) {
+      for (int h = 0; h < H - K + 1; h++) {
+        for (int w = 0; w < W - K + 1; w++) {
+          for (int c = 0; c < C; c++) {
+            long sum = 0;
+
+            int ofmapIndex = (f * (H - K + 1) * (W - K + 1) + h * (W - K + 1) + w);
+
+            System.out.printf("c = %d f = %d h = %d w = %d\n", c, f, h, w);
+            for (int kx = 0; kx < K; kx++) {
+              for (int ky = 0; ky < K; ky++) {
+                int ifmapIndex = (c * H * W + (h + kx) * W + (w + ky));
+                int coeffIndex = (f * C * K * K + c * K * K + kx * K + ky);
+
+                System.out.printf(
+                    "ifmap[%d][%d] = %d\n", kx, ky, ifmap[ifmapIndex]);
+                System.out.printf(
+                    "coeff[%d][%d] = %d\n", kx, ky, coeff[coeffIndex]);
+                sum += ifmap[ifmapIndex] * coeff[coeffIndex];
+              }
+            }
+
+            System.out.printf("sum = %d\n", sum);
+            ofmap[ofmapIndex] += sum;
+          }
+        }
+      }
+    }
+
+    for (int i = 0; i < ofmap.length; i++) {
+      System.out.printf("ofmap[%d] = %d\n", i, ofmap[i]);
+    }
+  }
+
+  /**
+   * Generate input feature map list
+   * 
+   * @return
+   */
+  public List<Bits> generateIfmap() {
+    int C = params.C;
+    int F = params.F;
+    int H = params.H;
+    int W = params.W;
+    int K = params.K;
+    int PC = params.PC;
+    int PF = params.PF;
+    int PK = params.PK;
+    int BW = params.BW;
+
+    List<Bits> result = new ArrayList<Bits>();
+
+    for (int f = 0; f < F; f += PF) {
+      for (int h = 0; h < H - K + 1; h++) {
+        for (int w = 0; w < W - K + 1; w += PK) {
+          for (int c = 0; c < C; c += PC) {
+            long[] payload = new long[PC * K * (K + PK - 1)];
+
+            for (int p = 0; p < PC; p++) {
+              for (int x = 0; x < K; x++) {
+                for (int y = 0; y < K + PK - 1; y++) {
+                  int dstIdx = (p * K * (K + PK - 1) + x * (K + PK - 1) + y);
+                  int srcIdx = (c + p) * H * W + (h + x) * W + (w + y);
+
+                  payload[dstIdx] = ifmap[srcIdx];
+                }
+              }
+            }
+
+            result.add(ConvLayerDataUtils.pack(BW, payload));
+          }
+        }
+      }
+    }
+
+    return result;
+  }
+
+  public List<Bits> generateIfmapOrigin() {
+    int C = params.C;
+    int F = params.F;
+    int H = params.H;
+    int W = params.W;
+    int K = params.K;
+    int PC = params.PC;
+    int PF = params.PF;
+    int PK = params.PK;
+    int BW = params.BW;
+
+    List<Bits> result = new ArrayList<Bits>();
+
+    for (int c = 0; c < C; c += PC) {
+      for (int h = 0; h < H; h++) {
+        for (int w = 0; w < W; w += PK) {
+          long[] payload = new long[PC * PK];
+
+          for (int pc = 0; pc < PC; pc++) {
+            for (int pk = 0; pk < PK; pk++) {
+              int dstIdx = pc * PK + pk;
+              int srcIdx = (c + pc) * H * W + h * W + (w + pk);
+
+              payload[dstIdx] = ifmap[srcIdx];
+            }
+          }
+
+          result.add(ConvLayerDataUtils.pack(BW, payload));
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Generate coefficient list
+   * 
+   * @return
+   */
+  public List<Bits> generateCoeff() {
+    int C = params.C;
+    int F = params.F;
+    int H = params.H;
+    int W = params.W;
+    int K = params.K;
+    int PC = params.PC;
+    int PF = params.PF;
+    int PK = params.PK;
+    int BW = params.BW;
+
+    List<Bits> result = new ArrayList<Bits>();
+
+    for (int f = 0; f < F; f += PF) {
+      for (int h = 0; h < H - K + 1; h++) {
+        for (int w = 0; w < W - K + 1; w += PK) {
+          for (int c = 0; c < C; c += PC) {
+            long[] payload = new long[PF * PC * K * K];
+
+            for (int pf = 0; pf < PF; pf++) {
+              for (int pc = 0; pc < PC; pc++) {
+                for (int kx = 0; kx < K; kx++) {
+                  for (int ky = 0; ky < K; ky++) {
+                    int srcIdx = ((f + pf) * C * K * K + (c + pc) * K * K + kx
+                        * K + ky);
+                    int dstIdx = (pf * PC * K * K + pc * K * K + kx * K + ky);
+
+                    payload[dstIdx] = coeff[srcIdx];
+                  }
+                }
+              }
+            }
+
+            result.add(ConvLayerDataUtils.pack(BW, payload));
+          }
+        }
+      }
+    }
+
+    return result;
+  }
+
+  public List<Bits> generateCoeffOrigin() {
+    int C = params.C;
+    int F = params.F;
+    int H = params.H;
+    int W = params.W;
+    int K = params.K;
+    int PC = params.PC;
+    int PF = params.PF;
+    int PK = params.PK;
+    int BW = params.BW;
+
+    List<Bits> result = new ArrayList<Bits>();
+
+    /* TODO: only works for CHANNEL_MAJOR */
+    if (params.seq == CompSeq.CHANNEL_MAJOR) {
+      for (int c = 0; c < C; c += PC) {
+        for (int f = 0; f < F; f += PF) {
+          long[] payload = new long[PF * PC * K * K];
+
+          for (int pf = 0; pf < PF; pf++) {
+            for (int pc = 0; pc < PC; pc++) {
+              for (int kx = 0; kx < K; kx++) {
+                for (int ky = 0; ky < K; ky++) {
+                  int srcIdx = ((f + pf) * C * K * K + (c + pc) * K * K + kx
+                      * K + ky);
+                  int dstIdx = (pf * PC * K * K + pc * K * K + kx * K + ky);
+
+                  payload[dstIdx] = coeff[srcIdx];
+                }
+              }
+            }
+          }
+
+          result.add(ConvLayerDataUtils.pack(BW, payload));
+        }
+      }
+    } else if (params.seq == CompSeq.FILTER_MAJOR) {
+      for (int f = 0; f < F; f += PF) {
+        for (int c = 0; c < C; c += PC) {
+          long[] payload = new long[PF * PC * K * K];
+
+          for (int pf = 0; pf < PF; pf++) {
+            for (int pc = 0; pc < PC; pc++) {
+              for (int kx = 0; kx < K; kx++) {
+                for (int ky = 0; ky < K; ky++) {
+                  int srcIdx = ((f + pf) * C * K * K + (c + pc) * K * K + kx
+                      * K + ky);
+                  int dstIdx = (pf * PC * K * K + pc * K * K + kx * K + ky);
+
+                  payload[dstIdx] = coeff[srcIdx];
+                }
+              }
+            }
+          }
+
+          result.add(ConvLayerDataUtils.pack(BW, payload));
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Generate output feature map list
+   * 
+   * @return
+   */
+  public List<Bits> generateOfmap() {
+    int F = params.F;
+    int H = params.H;
+    int W = params.W;
+    int K = params.K;
+    int PF = params.PF;
+    int PK = params.PK;
+    int BW = params.BW;
+
+    List<Bits> result = new ArrayList<Bits>();
+
+    for (int f = 0; f < F; f += PF) {
+      for (int h = 0; h < H - K + 1; h++) {
+        for (int w = 0; w < W - K + 1; w += PK) {
+          long[] payload = new long[PF * PK];
+
+          for (int pf = 0; pf < PF; pf++) {
+            for (int pk = 0; pk < PK; pk++) {
+              int srcIdx = ((f + pf) * (H - K + 1) * (W - K + 1) + h
+                  * (W - K + 1) + (w + pk));
+              int dstIdx = pf * PK + pk;
+
+              payload[dstIdx] = ofmap[srcIdx];
+            }
+          }
+
+          result.add(ConvLayerDataUtils.pack(BW, payload));
+        }
+      }
+    }
+
+    return result;
+  }
+
+  public long getNumCycles() {
+    long totalCycles = params.C * params.F * params.H * params.W;
+    return totalCycles / (params.PC * params.PF * params.PK);
+  }
+
+  public long numCycles() {
+    ConvLayerParameters cp = cps.get(0);
+
+    return (cp.C * cp.F * cp.H * cp.W) / (cp.PC * cp.PF * cp.PK);
+  }
+
+}

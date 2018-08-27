@@ -1,0 +1,123 @@
+package com.custom_computing_ic.maxdeep.kernel.conv2d;
+
+import java.util.List;
+
+import org.junit.Assert;
+import org.junit.Test;
+
+import com.custom_computing_ic.maxdeep.kernel.conv2d.data.ConvLayerDataGenerator;
+import com.custom_computing_ic.maxdeep.kernel.conv2d.lib.Conv2DKernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.managers.standard.SimulationManager;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+
+public class Conv2DKernelTest {
+
+  private class TestKernel extends Kernel {
+    TestKernel(KernelParameters params, ConvLayerParameters convParams) {
+      super(params);
+
+      DFEType scalarT = dfeUInt(8);
+      Conv2DKernel conv2d = new Conv2DKernel(this, convParams, scalarT);
+      
+      DFEVector<DFEVar> ifmap = io.input("ifmap", conv2d.getIfmapT());
+      DFEVector<DFEVar> coeff = io.input("coeff", conv2d.getCoeffT());
+      
+      conv2d.setInputs(ifmap, coeff);
+      DFEVector<DFEVar> ofmap = conv2d.getOfmap();
+      
+      io.output("ofmap", conv2d.getOfmapT()) <== ofmap;
+    }
+  }
+
+  public static class TestData {
+    private final ConvLayerParameters params;
+    
+    public List<Bits> ifmap;
+    public List<Bits> coeff;
+    public List<Bits> ofmap;
+
+    public TestData(ConvLayerParameters params) {
+      this.params = params;
+      
+      ConvLayerDataGenerator gen = new ConvLayerDataGenerator(params);
+      this.ifmap = gen.generateIfmap();
+      this.coeff = gen.generateCoeff();
+      this.ofmap = gen.generateOfmap();
+    }
+    
+    public int getIfmapWidth() {
+      int PC = params.PC;
+      int PK = params.PK;
+      int K = params.K;
+      
+      return PC * K * (K + PK - 1);
+    }
+    
+    public int getCoeffWidth() {
+      int PC = params.PC;
+      int PF = params.PF;
+      int K = params.K;
+      
+      return PF * PC * K * K;
+    }
+    
+    public int getOfmapWidth() {
+      int PF = params.PF;
+      int PK = params.PK;
+      
+      return PF * PK;
+    }
+
+    public long getNumCycles() {
+      long totalCycles = params.C * params.F * (params.H - params.K + 1)
+          * (params.W - params.K + 1);
+      return totalCycles / (params.PC * params.PF * params.PK);
+    }
+  }
+  
+  @Test
+  public void testWithoutParallel() { test(1, 4, 1, 1, 1); }
+  
+  @Test
+  public void testWithFilterParallel() { test(1, 4, 1, 2, 1); }
+  
+  @Test
+  public void testWithChannelParallel() { test(2, 4, 2, 2, 1); }
+
+  @Test
+  public void testWithKernelParallel() { test(2, 4, 2, 2, 2); }
+  
+  /**
+   * Generate test manager and kernel.
+   * 
+   * TODO: because the data generator can only generate final results, C/PC should equal 1 to make sure the computation terminates in 1 cycle.
+   * 
+   * @param C
+   * @param F
+   * @param PC
+   * @param PF
+   * @param PK
+   */
+  private void test(int C, int F, int PC, int PF, int PK) {
+    ConvLayerParameters convParams = new ConvLayerParameters.Builder(
+        10, 10, C, F, 3).PC(PC).PF(PF).PK(PK).build();
+    SimulationManager mgr = new SimulationManager(String.format(
+        "Conv2DTest_%d_%d_%d_%d_%d", C, F, PC, PF, PK));
+    TestKernel knl = new TestKernel(mgr.makeKernelParameters(), convParams);
+    TestData data = new TestData(convParams);
+    
+    mgr.setKernel(knl);
+    mgr.setKernelCycles(data.getNumCycles());
+    mgr.setInputDataRaw("ifmap", data.ifmap);
+    mgr.setInputDataRaw("coeff", data.coeff);
+    mgr.runTest();
+    
+    List<Bits> ofmap = mgr.getOutputDataRaw("ofmap");
+    Assert.assertArrayEquals(data.ofmap.toArray(), ofmap.toArray());
+  }
+}

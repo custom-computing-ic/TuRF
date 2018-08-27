@@ -1,0 +1,90 @@
+package com.custom_computing_ic.maxdeep.lib;
+
+import org.junit.Assert;
+import org.junit.Test;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+import com.maxeler.maxcompiler.v2.managers.standard.SimulationManager;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+
+public class DotProductKernelComponentTest {
+
+  private class DotProductTestKernel extends Kernel {
+
+    protected DotProductTestKernel(KernelParameters parameters, int vecSize,
+        int bitWidth) {
+      super(parameters);
+
+      DFEType type = dfeUInt(bitWidth);
+      DFEVectorType<DFEVar> vecType = new DFEVectorType<DFEVar>(type, vecSize);
+      DFEVector<DFEVar> vecA = io.input("vecA", vecType);
+      DFEVector<DFEVar> vecB = io.input("vecB", vecType);
+//      debug.simPrintf("vecA = %KObj%\n", vecA);
+//      debug.simPrintf("vecB = %KObj%\n", vecB);
+      
+      DotProductKernel dotProd = new DotProductKernel(this,
+          vecSize, type);
+      dotProd.setInputs(vecA, vecB);
+      io.output("output", type) <== dotProd.getOutput();
+    }
+  }
+  
+  private class DotProductTestData {
+    final Bits[] vecA, vecB;
+    final Bits[] expected;
+    
+    public DotProductTestData(int numVec, int vecSize, int bitWidth) {
+      vecA = new Bits[numVec];
+      vecB = new Bits[numVec];
+      expected = new Bits[numVec];
+      
+      for (int i = 0; i < numVec; i ++) {
+        vecA[i] = new Bits(bitWidth, i * vecSize);
+        vecB[i] = new Bits(bitWidth, i * vecSize);
+        
+        for (int j = 1; j < vecSize; j ++) {
+          vecA[i] = vecA[i].cat(new Bits(bitWidth, i * vecSize + j));
+          vecB[i] = vecB[i].cat(new Bits(bitWidth, i * vecSize + j));
+        }
+      }
+      
+      for (int i = 0; i < numVec; i ++) {
+        int sum = 0;
+        for (int j = 0; j < vecSize; j ++) {
+          sum += (i * vecSize + j) * (i * vecSize + j);
+        }
+        expected[i] = new Bits(bitWidth, sum);
+      }
+    }
+  }
+  
+  @Test public void testSingle() { test(10, 1, 32); }
+  @Test public void testDouble() { test(10, 2, 32); }
+  @Test public void testTriple() { test(10, 3, 32); }
+  @Test public void testHundred() { test(10, 100, 32); }
+
+  
+  public void test(int numVec, int vecSize, int bitWidth) {
+    SimulationManager mgr = new SimulationManager(String.format(
+        "DotProductKernelComponentTest_%d_%d",
+        vecSize,
+        bitWidth));
+    DotProductTestKernel knl = new DotProductTestKernel(
+        mgr.makeKernelParameters(), vecSize, bitWidth);
+    DotProductTestData data = new DotProductTestData(numVec, vecSize, bitWidth);
+    mgr.setKernel(knl);
+    mgr.setKernelCycles(numVec);
+    mgr.setInputDataRaw("vecA", data.vecA);
+    mgr.setInputDataRaw("vecB", data.vecB);
+    mgr.runTest();
+    
+    Bits[] output = mgr.getOutputDataRawArray("output");
+   
+    Assert.assertArrayEquals(data.expected, output);
+  }
+}

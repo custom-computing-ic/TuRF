@@ -1,0 +1,179 @@
+package com.custom_computing_ic.maxdeep.kernel.conv2d.lib;
+
+import org.junit.Assert;
+import org.junit.Test;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.managers.standard.SimulationManager;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+
+public class Conv2DFactorizedModuleTest {
+
+  private class TestKernel extends Kernel {
+    public TestKernel(KernelParameters parameters,
+        Conv2DFactorizedModuleParameter conv2dParams, int bitWidth) {
+      super(parameters);
+
+      DFEType scalarT = dfeUInt(bitWidth);
+      DFEType indexT = dfeInt(32);
+      Conv2DFactorizedModule module = new Conv2DFactorizedModule(getKernel(),
+          conv2dParams, scalarT);
+      module.setIfmap(io.input("ifmap", module.getIfmapVecT(), module.getIfmapEnable()));
+      module.setDepthCoeff(io.input("depth_coeff", module.getDepthCoeffVecT(), module.getIfmapEnable()));
+      module.setPointCoeff(io.input("point_coeff", module.getPointCoeffVecT()));
+      io.output("ofmap", module.getOfmapVecT(), module.getOfmapValid()) <== module.getOfmap();
+    }
+  }
+
+  private class TestData {
+    final Bits[] ifmap, depthCoeff, pointCoeff, ofmap;
+
+    private final int ifmapHeight;
+    private final int ifmapWidth;
+    private final int ifmapNumChnl;
+    private final int ofmapNumChnl;
+    private final int knlHeight, knlWidth;
+    private final int ofmapHeight, ofmapWidth;
+    private final int numParaChnl, numParaFltr;
+
+    TestData(Conv2DFactorizedModuleParameter conv2dParams, int bitWidth) {
+      this.ifmapHeight = conv2dParams.getIfmapHeight();
+      this.ifmapWidth = conv2dParams.getIfmapWidth();
+      this.ifmapNumChnl = conv2dParams.getIfmapNumChnl();
+      this.ofmapNumChnl = conv2dParams.getOfmapNumChnl();
+      this.knlHeight = conv2dParams.getKnlHeight();
+      this.knlWidth = conv2dParams.getKnlWidth();
+      this.numParaChnl = conv2dParams.getIfmapNumParaChnl();
+      this.numParaFltr = conv2dParams.getOfmapNumParaChnl();
+      this.ofmapHeight = ifmapHeight - knlHeight + 1;
+      this.ofmapWidth = ifmapWidth - knlWidth + 1;
+
+      this.ifmap = new Bits [getNumCycles() / (ofmapNumChnl / numParaFltr)];
+      this.depthCoeff = new Bits[getNumCycles()];
+      this.pointCoeff = new Bits[getNumCycles()];
+      this.ofmap = new Bits [getNumCycles() / (ifmapNumChnl / numParaChnl)];
+
+      int [] ifmapData = new int[ifmapHeight * ifmapWidth * ifmapNumChnl];
+      int [] depthCoeffData = new int [knlHeight * knlWidth * ifmapNumChnl];
+      int [] pointCoeffData = new int [ifmapNumChnl * ofmapNumChnl];
+      int [] ofmapData = new int[ofmapHeight * ofmapWidth * ofmapNumChnl];
+
+      for (int i = 0; i < ifmapData.length; i++)
+        ifmapData[i] = i;
+      for (int i = 0; i < depthCoeffData.length; i++)
+        depthCoeffData[i] = i;
+      for (int i = 0; i < pointCoeffData.length; i++)
+        pointCoeffData[i] = i;
+      for (int f = 0; f < ofmapNumChnl; f ++) {
+        for (int h = 0; h < ofmapHeight; h ++) {
+          for (int w = 0; w < ofmapWidth; w ++) {
+            int sum = 0;
+            for (int c = 0; c < ifmapNumChnl; c ++) {
+              int tmp = 0;
+              for (int kh = 0; kh < knlHeight; kh ++) {
+                for (int kw = 0; kw < knlWidth; kw ++) {
+                  tmp += ifmapData[c * ifmapHeight * ifmapWidth + (h + kh) * ifmapWidth + (w + kw)] * depthCoeffData[c * knlHeight * knlWidth + kh * knlWidth + kw];
+                }
+              }
+              sum += tmp * pointCoeffData[f * ifmapNumChnl + c];
+            }
+            ofmapData[f * ofmapHeight * ofmapWidth + h * ofmapWidth + w] = sum;
+          }
+        }
+      }
+
+      int idx = 0;
+      int ofmapIdx = 0;
+      for (int f = 0; f < ofmapNumChnl; f += numParaFltr) {
+        for (int c = 0; c < ifmapNumChnl; c += numParaChnl) {
+          for (int h = 0; h < ofmapHeight; h ++) {
+            for (int w = 0; w < ofmapWidth; w ++) {
+              int [] ifmapValues = new int[numParaChnl * knlHeight * knlWidth];
+              int [] depthValues = new int[numParaChnl * knlHeight * knlWidth];
+              int [] pointValues = new int[numParaChnl * numParaFltr];
+              for (int p = 0; p < numParaChnl; p ++) {
+                for (int kh = 0; kh < knlHeight; kh ++) {
+                  for (int kw = 0; kw < knlWidth; kw ++) {
+                    ifmapValues[p * knlHeight * knlWidth + kh * knlWidth + kw] =
+                      ifmapData[(c + p) * ifmapHeight * ifmapWidth + (h + kh) * ifmapWidth + (w + kw)];
+                    depthValues[p * knlHeight * knlWidth + kh * knlWidth + kw] =
+                      depthCoeffData[(c + p) * knlHeight * knlWidth + kh * knlWidth + kw];
+                  }
+                }
+              }
+              for (int pf = 0; pf < numParaFltr; pf ++)
+                for (int pc = 0; pc < numParaChnl; pc ++)
+                  pointValues[pf * numParaChnl + pc] =
+                    pointCoeffData[(f + pf) * ifmapNumChnl + (c + pc)];
+
+              if (f == 0)
+                ifmap[idx] = pack(bitWidth, ifmapValues);
+              depthCoeff[idx] = pack(bitWidth, depthValues);
+              pointCoeff[idx] = pack(bitWidth, pointValues);
+              idx += 1;
+            }
+
+          }
+        }
+
+        for (int h = 0; h < ofmapHeight; h ++) {
+          for (int w = 0; w < ofmapWidth; w ++) {
+            int [] ofmapValues = new int[numParaFltr];
+            for (int p = 0; p < numParaFltr; p ++)
+              ofmapValues[p] =
+                ofmapData[(f + p) * ofmapHeight * ofmapWidth + h * ofmapWidth + w];
+            ofmap[ofmapIdx] = pack(bitWidth, ofmapValues);
+            ofmapIdx += 1;
+          }
+        }
+      }
+    }
+
+    private Bits pack(int bitWidth, int[] values) {
+      Bits bits = new Bits(bitWidth, values[values.length - 1]);
+      for (int i = values.length - 2; i >= 0; i--)
+        bits = bits.cat(new Bits(bitWidth, values[i]));
+      return bits;
+    }
+
+    public int getNumCycles() {
+      return ofmapHeight * ofmapWidth * ifmapNumChnl / numParaChnl * ofmapNumChnl / numParaFltr;
+    }
+  }
+
+  @Test public void testSimple() { test(2, 2, 1, 1, 8); }
+  @Test public void testParaChnlSimple() { test(2, 2, 2, 1, 8); }
+  @Test public void testParaFltrSimple() { test(2, 2, 1, 2, 8); }
+  @Test public void testParaFullSimple() { test(2, 2, 2, 2, 8); }
+
+  @Test public void testComplex() { test(6, 6, 1, 1, 8); }
+  @Test public void testParaChnlComplex() { test(10, 10, 2, 1, 8); }
+  @Test public void testParaFltrComplex() { test(10, 10, 1, 2, 8); }
+  @Test public void testParaFullComplex() { test(10, 10, 2, 2, 8); }
+
+  private void test(int ifmapNumChnl, int ofmapNumChnl, int numParaChnl, int numParaFltr, int bitWidth) {
+    Conv2DFactorizedModuleParameter conv2dParams =
+      new Conv2DFactorizedModuleParameter
+        .StaticBuilder(5, 5, ifmapNumChnl, ofmapNumChnl)
+        .knlShape(3)
+        .ifmapNumParaChnl(numParaChnl)
+        .ofmapNumParaChnl(numParaChnl)
+        .build();
+
+    SimulationManager mgr = new SimulationManager(
+        String.format("Conv2DFactorizedModuleTestManager_%d_%d_%d_%d_%d",
+            ifmapNumChnl, ofmapNumChnl, numParaChnl, numParaFltr, bitWidth));
+    TestData data = new TestData(conv2dParams, bitWidth);
+    mgr.setKernel(new TestKernel(mgr.makeKernelParameters(), conv2dParams, bitWidth));
+    mgr.setKernelCycles(data.getNumCycles());
+    mgr.setInputDataRaw("ifmap", data.ifmap);
+    mgr.setInputDataRaw("depth_coeff", data.depthCoeff);
+    mgr.setInputDataRaw("point_coeff", data.pointCoeff);
+    mgr.runTest();
+    Bits[] ofmap = mgr.getOutputDataRawArray("ofmap");
+    Assert.assertArrayEquals(data.ofmap, ofmap);
+  }
+
+}

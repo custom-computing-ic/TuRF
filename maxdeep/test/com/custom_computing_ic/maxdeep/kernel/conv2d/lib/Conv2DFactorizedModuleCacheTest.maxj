@@ -1,0 +1,99 @@
+package com.custom_computing_ic.maxdeep.kernel.conv2d.lib;
+
+import org.junit.Assert;
+import org.junit.Test;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.managers.standard.SimulationManager;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+
+public class Conv2DFactorizedModuleCacheTest {
+
+  private class TestKernel extends Kernel {
+    public TestKernel(KernelParameters params,
+        Conv2DFactorizedModuleParameter conv2dParams, int bitWidth) {
+      super(params);
+
+      DFEType scalarT = dfeUInt(bitWidth);
+
+      Conv2DFactorizedModuleCache cache = new Conv2DFactorizedModuleCache(
+          getKernel(), conv2dParams, scalarT);
+      DFEVar writeEnable = io.input("writeEnable", dfeBool());
+      cache.setInput(io.input("dataIn", cache.getVectorT(), writeEnable));
+      cache.setWriteEnable(writeEnable);
+      io.output("dataOut", cache.getVectorT()) <== cache.getOutput();
+    }
+  }
+  
+  private class TestData {
+    final Conv2DFactorizedModuleParameter params;
+    final Bits[] dataIn, writeEnable, dataOut;
+    
+    public TestData(Conv2DFactorizedModuleParameter params, int bitWidth) {
+      this.params = params;
+      
+      dataIn = new Bits[getNumCycles() / params.getOfmapNumChnl()];
+      writeEnable = new Bits[getNumCycles()];
+      dataOut = new Bits[getNumCycles()];
+      
+      for (int f = 0; f < params.getOfmapNumChnl(); f ++) {
+        for (int i = 0; i < params.getCacheTotalSize() / params.getNumParaIfmapChnl(); i ++) {
+          if (f == 0) {
+            int [] values = new int[params.getNumParaIfmapChnl()];
+            for (int p = 0; p < params.getNumParaIfmapChnl(); p++)
+              values[p] = p + i * params.getNumParaIfmapChnl();
+            dataIn[i] = pack(bitWidth, values);
+          }
+          int idx = f * params.getCacheTotalSize() / params.getNumParaIfmapChnl() + i;
+          dataOut[idx] = dataIn[i];
+          if (f == 0)
+            writeEnable[idx] = new Bits(1, 1);
+          else
+            writeEnable[idx] = new Bits(1, 0);
+        }
+      }
+    }
+    
+    private Bits pack(int bitWidth, int[] values) {
+      Bits bits = new Bits(bitWidth, values[values.length - 1]);
+      for (int i = values.length - 2; i >= 0; i--)
+        bits = bits.cat(new Bits(bitWidth, values[i]));
+      return bits;
+    }
+    
+    public int getNumCycles() {
+      return params.getCacheTotalSize() / params.getNumParaIfmapChnl() * params.getOfmapNumChnl();
+    }
+  }
+
+  @Test public void testSimple() { test(2, 1, 1, 8); }
+  
+  @Test public void testDoubleOfmapChnl() { test(2, 2, 1, 8); }
+
+  @Test public void testTripleOfmapChnl() { test(2, 3, 1, 8); }
+  
+  @Test public void testParallelOfmapChnl() { test(4, 3, 2, 8); }
+  
+  private void test(int ifmapNumChnl, int ofmapNumChnl, int numParaIfmapChnl, int bitWidth) {
+    Conv2DFactorizedModuleParameter conv2dParams =
+      new Conv2DFactorizedModuleParameter
+        .StaticBuilder(5, 5, ifmapNumChnl, ofmapNumChnl)
+        .knlShape(3)
+        .numParaIfmapChnl(numParaIfmapChnl)
+        .build();
+    
+    SimulationManager mgr = new SimulationManager(String.format("Conv2DFactorizedModuleCache_%d_%d_%d_%d", ifmapNumChnl, ofmapNumChnl, numParaIfmapChnl, bitWidth));
+    TestData data = new TestData(conv2dParams, bitWidth);
+    mgr.setKernel(new TestKernel(mgr.makeKernelParameters(), conv2dParams, bitWidth));
+    mgr.setKernelCycles(data.getNumCycles());
+    mgr.setInputDataRaw("dataIn", data.dataIn);
+    mgr.setInputDataRaw("writeEnable", data.writeEnable);
+    mgr.runTest();
+    
+    Bits[] dataOut = mgr.getOutputDataRawArray("dataOut");
+    Assert.assertArrayEquals(data.dataOut, dataOut);
+  }
+}

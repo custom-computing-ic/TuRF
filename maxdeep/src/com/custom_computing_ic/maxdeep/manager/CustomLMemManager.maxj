@@ -1,0 +1,14 @@
+package com.custom_computing_ic.maxdeep.manager;
+
+import com.custom_computing_ic.maxdeep.manager.conv_single_layer.ConvSingleLayerEngineParameters;
+import com.maxeler.maxcompiler.v2.managers.custom.CustomManager;
+import com.maxeler.maxcompiler.v2.managers.custom.stdlib.LMemInterface;
+
+/** @author Ruizhe Zhao */
+public class CustomLMemManager extends CustomManager {
+  public LMemInterface iface;
+
+  public CustomLMemManager(ConvSingleLayerEngineParameters params) {
+    super(params);
+  }
+}

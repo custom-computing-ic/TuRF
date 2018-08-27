@@ -1,0 +1,492 @@
+/**
+ *
+ */
+package com.custom_computing_ic.maxdeep.kernel.conv2d;
+
+import com.custom_computing_ic.maxdeep.kernel.conv2d.lib.ConvLayerLineBuffer;
+import com.custom_computing_ic.maxdeep.kernel.conv2d.winograd.WinogradTransform;
+import com.custom_computing_ic.maxdeep.kernel.pool.PoolingLayerParameters;
+import com.custom_computing_ic.maxdeep.lib.LayerParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEFix.SignMode;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFETypeFactory;
+
+/**
+ * Parameters used for building a convolution layer.
+ * 
+ * @author Ruizhe Zhao
+ * 
+ */
+public class ConvLayerParameters extends LayerParameters {
+  public final int PC, PF, PK, PH, PW; // level of parallelisation
+  public final int H; // height
+  public final int W; // width
+  public final int OH;
+  public final int OW;
+  public final int C; // number of channels
+  public final int F; // number of filters
+  public final int K; // kernel size
+  public final CompSeq seq; // computation sequence
+  public final String name;
+  public final boolean dbg;
+  public final Type type;
+  public int LRNLocalSize;
+  public boolean useDRAM;
+  public boolean useWinograd;
+  public boolean winogradWeightsOffline;
+
+
+  public static final int WINOGRAD_TILE_SIZE = 4;
+  public int winoH;
+  public int winoW;
+
+  public PoolingLayerParameters pool;
+
+  /**
+   * Computation sequence
+   * 
+   * @author Ruizhe Zhao
+   * 
+   */
+  public enum CompSeq {
+    FILTER_MAJOR, CHANNEL_MAJOR, PIXEL_MAJOR
+  }
+
+  /**
+   * Type of convolution computation
+   * 
+   * @author Ruizhe Zhao
+   * 
+   */
+  public enum Type {
+    STANDARD, POINTWISE, DEPTHWISE_SEPARABLE, DEPTHWISE_SEPARABLE_V2, BOTTLENECK
+  }
+
+  public ConvLayerParameters(Builder builder) {
+    // inherited from the parent
+    this.BW = builder.BW;
+    this.dtype = builder.dtype;
+    this.numFracBits = builder.numFracBits;
+
+    this.H = builder.H;
+    this.W = builder.W;
+    this.C = builder.C;
+    this.F = builder.F;
+    this.K = builder.K;
+    this.OH = builder.OH;
+    this.OW = builder.OW;
+    this.PC = builder.PC;
+    this.PF = builder.PF;
+    this.PK = builder.PK;
+    this.PH = builder.PH;
+    this.PW = builder.PW;
+    this.seq = builder.seq;
+    this.name = builder.name;
+    this.dbg = builder.dbg;
+    this.type = builder.type;
+    this.LRNLocalSize = 0;
+    this.pool = builder.pool;
+    this.useDRAM = builder.useDRAM;
+    this.useWinograd = builder.useWinograd;
+    this.winogradWeightsOffline = builder.winogradWeightsOffline;
+    this.winoH = H + ConvLayerLineBuffer.WINO_LBUF_PADDING_WIDTH;
+    this.winoW = W + ConvLayerLineBuffer.WINO_LBUF_PADDING_WIDTH;
+  }
+
+  public ConvLayerParameters createDepthwiseParameters() {
+    /**
+     * TODO: One thing not clear - PC is actually not sensible here However, we still need it to
+     * specify correct number of line buffers.
+     */
+    return new ConvLayerParameters.Builder(H, W, C, C, K).BW(BW).PC(PC).PK(PK).dbg(dbg)
+        .useWinograd(useWinograd).build();
+  }
+
+  public ConvLayerParameters createPointwiseParameters() {
+    return new ConvLayerParameters.Builder(OH, OW, C, F, 1).BW(BW).PC(PC).PF(PF).PK(PK)
+        .seq(CompSeq.FILTER_MAJOR).dbg(dbg).build();
+  }
+
+  /**
+   * Create DFEType from ConvLayerParameters.
+   * 
+   * @return Created DFEType instance.
+   */
+  public DFEType getDFEType() {
+    if (dtype.equals("float")) {
+      if (this.BW != 32)
+        throw new IllegalArgumentException(String.format(
+            "If dtype is float, BW should be 32. Got: %d", BW));
+
+      return DFETypeFactory.dfeFloat(8, 24);
+    } else if (dtype.equals("fixed")) {
+      return DFETypeFactory.dfeFix(BW - numFracBits, numFracBits, SignMode.TWOSCOMPLEMENT);
+    } else if (dtype.equals("int")) {
+      return DFETypeFactory.dfeInt(BW);
+    }
+
+    throw new IllegalArgumentException("BW " + BW + " and dtype " + dtype
+        + " don't give a valid type definition.");
+  }
+
+  public long getNumCycles() {
+    if (useWinograd) {
+      int PH = WinogradTransform.M;
+      int PW = WinogradTransform.M;
+
+      return ((long) winoH * winoW * C * F) / (PC * PF * PH * PW);
+    }
+
+    if (type == Type.STANDARD)
+      return ((long) H * W * C * F) / (PC * PF * PK);
+    if (type == Type.DEPTHWISE_SEPARABLE)
+      return ((long) H * W * C * F) / (PC * PF * PK);
+    if (type == Type.DEPTHWISE_SEPARABLE_V2)
+      return ((long) H * W * C) / (PC * PK) + ((long) H * W * C * F) / (PC * PF * PK);
+    if (type == Type.POINTWISE)
+      return ((long) H * W * C * F) / (PC * PF * PH * PW);
+    throw new IllegalArgumentException("getNumCycles has not implemented for the current type: "
+        + type.name());
+  }
+
+  public int getPoolNumCycles() {
+    return (OH * OW * F) / (PK * PF);
+  }
+
+  @Override
+  public long getIfmapStreamNumElems() {
+    return useWinograd ? C * winoH * winoW : C * H * W;
+  }
+
+  @Override
+  public int getIfmapVecSize() {
+    if (type == Type.POINTWISE)
+      return PC * PH * PW;
+
+    // standard
+    return useWinograd ? PC * ConvLayerLineBuffer.WINO_LBUF_NUM_PIPES : PC * PK;
+  }
+
+  @Override
+  public long getCoeffStreamNumElems() {
+    if (useWinograd && winogradWeightsOffline)
+      return C * F * WinogradTransform.TILE_SIZE * WinogradTransform.TILE_SIZE;
+    if (type == Type.STANDARD)
+      return C * F * K * K;
+    if (type == Type.POINTWISE)
+      return C * F;
+
+    return C * (F / PF + 1) * Math.max(K * K, PF);
+  }
+
+  @Override
+  public int getCoeffVecSize() {
+    // The weights offline mode of Winograd will increase the vector size of
+    // coefficients.
+    if (useWinograd && winogradWeightsOffline)
+      return PC * PF * WinogradTransform.TILE_SIZE * WinogradTransform.TILE_SIZE;
+    if (type == Type.POINTWISE)
+      return PC * PF;
+    if (type == Type.DEPTHWISE_SEPARABLE_V2)
+      return PC * Math.max(K * K, PF);
+    if (type == Type.STANDARD || type == Type.DEPTHWISE_SEPARABLE)
+      return (PC * PF * K * K);
+
+    throw new IllegalArgumentException("getNumCycles has not implemented for the current type: "
+        + type.name());
+  }
+
+  public int getCoeffStreamLMemBitWidth() {
+    return getCoeffLMemVecSize() * getCPUTypes().sizeInBytes() * 8;
+  }
+
+  public int getCoeffLMemVecSize() {
+    return getCoeffVecSize();
+  }
+
+  public long getDepthwiseCoeffStreamNumElems() {
+    return C * K * K;
+  }
+
+  public int getDepthwiseCoeffVecSize() {
+    return PC * K * K;
+  }
+
+  public int getDepthwiseCoeffLMemVecSize() {
+    return PC;
+  }
+
+  public long getPointwiseCoeffStreamNumElems() {
+    return C * F;
+  }
+
+  public int getPointwiseCoeffVecSize() {
+    return PC * PF;
+  }
+
+  @Override
+  public long getOfmapStreamNumElems() {
+    return F * OH * OW;
+  }
+
+  @Override
+  public int getOfmapVecSize() {
+    return useWinograd ? WinogradTransform.M * WinogradTransform.M * PF : PK * PF;
+  }
+
+  public long getIfmapStreamSize() {
+    long sizeInBytes = getCPUTypes().sizeInBytes();
+    return sizeInBytes * getIfmapStreamNumElems();
+  }
+
+  public long getCoeffStreamSize() {
+    long sizeInBytes = getCPUTypes().sizeInBytes();
+    return sizeInBytes * getCoeffStreamNumElems();
+  }
+
+  public long getDepthwiseCoeffStreamSize() {
+    long sizeInBytes = getCPUTypes().sizeInBytes();
+    return sizeInBytes * getDepthwiseCoeffStreamNumElems();
+  }
+
+  public long getPointwiseCoeffStreamSize() {
+    long sizeInBytes = getCPUTypes().sizeInBytes();
+    return sizeInBytes * getPointwiseCoeffStreamNumElems();
+  }
+
+  public long getOfmapStreamSize() {
+    long sizeInBytes = getCPUTypes().sizeInBytes();
+    return sizeInBytes * getOfmapStreamNumElems();
+  }
+
+  public int getCoeffStreamBitWidth() {
+    return getCoeffVecSize() * getCPUTypes().sizeInBytes() * 8;
+  }
+
+  public int getCoeffStreamChunkSize() {
+    return getCoeffVecSize() / (PC * PF);
+  }
+
+  public int getDepthwiseCoeffStreamBitWidth() {
+    return getDepthwiseCoeffVecSize() * getCPUTypes().sizeInBytes() * 8;
+  }
+
+  public int getDepthwiseCoeffStreamLMemBitWidth() {
+    return getDepthwiseCoeffLMemVecSize() * getCPUTypes().sizeInBytes() * 8;
+  }
+
+  public int getPointwiseCoeffStreamBitWidth() {
+    return getPointwiseCoeffVecSize() * getCPUTypes().sizeInBytes() * 8;
+  }
+
+  public int getIfmapStreamBitWidth() {
+    return getIfmapVecSize() * getCPUTypes().sizeInBytes() * 8;
+  }
+
+  public int getOfmapStreamBitWidth() {
+    return getOfmapVecSize() * getCPUTypes().sizeInBytes() * 8;
+  }
+
+  /**
+   * Builder class for ConvLayerParameters
+   * 
+   * @author Ruizhe Zhao
+   * 
+   */
+  public static class Builder {
+    private final int H;
+    private final int W;
+    private final int C;
+    private final int F;
+    private final int K;
+    private final int OH;
+    private final int OW;
+    private int BW; /* bit width */
+    private int PC;
+    private int PF;
+    private int PK;
+    private int PH;
+    private int PW;
+    private final int S;
+    private final int P;
+    private CompSeq seq;
+    private String name;
+    private String dtype;
+    private int numFracBits;
+    private Type type;
+    private PoolingLayerParameters pool;
+    private boolean useDRAM;
+    private boolean dbg;
+    private boolean useWinograd;
+    private boolean winogradWeightsOffline;
+
+    public Builder(int OH, int OW, int C, int F, int K) {
+      if (OH <= 0)
+        throw new IllegalArgumentException("OH should be larger than 0");
+      if (OW <= 0)
+        throw new IllegalArgumentException("OW should be larger than 0");
+      if (C <= 0)
+        throw new IllegalArgumentException("C should be larger than 0");
+      if (F <= 0)
+        throw new IllegalArgumentException("F should be larger than 0");
+      if (K <= 0)
+        throw new IllegalArgumentException("K should be larger than 0");
+
+      this.BW = 8;
+      this.dtype = "fixed";
+      this.numFracBits = 8;
+
+      // TODO: make S and P variable
+      this.S = 1;
+      this.P = 1;
+      this.OH = OH;
+      this.OW = OW;
+      this.H = (this.OH - 1) * this.S + 2 * this.P + 1;
+      this.W = (this.OW - 1) * this.S + 2 * this.P + 1;
+      this.C = C;
+      this.F = F;
+      this.K = K;
+      this.PF = 1;
+      this.PC = 1;
+      this.PK = 1;
+      this.PH = 1;
+      this.PW = 1;
+      this.seq = CompSeq.CHANNEL_MAJOR;
+      this.type = Type.STANDARD;
+      this.useDRAM = true;
+      this.useWinograd = false;
+      this.winogradWeightsOffline = false;
+      this.dbg = false;
+    }
+
+    public Builder BW(int BW) {
+      if (BW <= 0)
+        throw new IllegalArgumentException("BW should be larger than 0");
+      this.BW = BW;
+      return this;
+    }
+
+    public Builder dtype(String dtype) {
+      if (dtype.equals("float") || dtype.equals("fixed") || dtype.equals("int")) {
+        this.dtype = dtype;
+        return this;
+      }
+
+      throw new IllegalArgumentException(String.format(
+          "dtype cannot be recognised, should be one of float, " + "fixed, int. Got \"%s\"", dtype));
+    }
+
+    public Builder numFracBits(int numFracBits) {
+      if (numFracBits < 0 || numFracBits > BW)
+        throw new IllegalArgumentException(
+            "Number of fraction bits should >= 0 and <= bit width. Got " + numFracBits
+                + " while BW is " + BW);
+
+      this.numFracBits = numFracBits;
+      return this;
+    }
+
+    public Builder PF(int PF) {
+      if (PF <= 0)
+        throw new IllegalArgumentException("PF should be larger than 0");
+      if (F % PF != 0)
+        throw new IllegalArgumentException("F % PF should equal 0");
+      this.PF = PF;
+      return this;
+    }
+
+    public Builder PK(int PK) {
+      if (PK <= 0)
+        throw new IllegalArgumentException("PK should be larger than 0");
+      // TODO: we need to verify whether it is a good condition
+      if (W % PK != 0)
+        throw new IllegalArgumentException("W % PK should equal 0");
+      if ((W - K + 1) % PK != 0)
+        throw new IllegalArgumentException("OW % PK should equal 0");
+      if ((K + PK - 1) % PK != 0)
+        throw new IllegalArgumentException("(K + PK - 1) % PK should equal 0");
+      this.PK = PK;
+      return this;
+    }
+
+    public Builder PC(int PC) {
+      if (PC <= 0)
+        throw new IllegalArgumentException("PC should be larger than 0");
+      if (C % PC != 0)
+        throw new IllegalArgumentException("C % PC should equal 0");
+      this.PC = PC;
+      return this;
+    }
+
+    public Builder PH(int PH) {
+      if (PH <= 0)
+        throw new IllegalArgumentException("PH should be larger than 0, got " + PH);
+      if (H % PH != 0)
+        throw new IllegalArgumentException(String.format("H (%d) % PH (%d) != 0", H, PH));
+      this.PH = PH;
+
+      return this;
+    }
+
+    public Builder PW(int PW) {
+      if (PW <= 0)
+        throw new IllegalArgumentException("PW should be larger than 0, got " + PW);
+      if (W % PW != 0)
+        throw new IllegalArgumentException(String.format("W (%d) % PW (%d) != 0", W, PW));
+
+      this.PW = PW;
+
+      return this;
+    }
+
+    public Builder name(String name) {
+      this.name = name;
+
+      return this;
+    }
+
+    public Builder seq(CompSeq seq) {
+      this.seq = seq;
+
+      return this;
+    }
+
+    public Builder type(Type type) {
+      this.type = type;
+
+      return this;
+    }
+
+    public Builder pool(PoolingLayerParameters pool) {
+      this.pool = pool;
+
+      return this;
+    }
+
+    public Builder useDRAM(boolean useDRAM) {
+      this.useDRAM = useDRAM;
+
+      return this;
+    }
+
+    public Builder useWinograd(boolean useWinograd) {
+      this.useWinograd = useWinograd;
+      return this;
+    }
+
+    public Builder winogradWeightsOffline(boolean offline) {
+      this.winogradWeightsOffline = offline;
+      return this;
+    }
+
+    public Builder dbg(boolean dbg) {
+      this.dbg = dbg;
+      return this;
+    }
+
+    public ConvLayerParameters build() {
+      return new ConvLayerParameters(this);
+    }
+  }
+
+}

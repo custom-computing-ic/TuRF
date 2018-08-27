@@ -1,0 +1,153 @@
+package com.custom_computing_ic.maxdeep.kernel.conv2d.lib;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+
+import org.junit.Assert;
+import org.junit.Test;
+
+import com.custom_computing_ic.maxdeep.kernel.conv2d.ConvLayerParameters;
+import com.custom_computing_ic.maxdeep.kernel.conv2d.data.ConvLayerDataUtils;
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.CounterChain;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.managers.standard.SimulationManager;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+
+public class ConvLayerOfmapBufferTest {
+
+  public class TestKernel extends Kernel {
+
+    TestKernel(KernelParameters params, ConvLayerParameters cp) {
+      super(params);
+
+      DFEType scalarT = dfeUInt(cp.BW);
+
+      ConvLayerOfmapBuffer obuf = new ConvLayerOfmapBuffer(getKernel(), cp,
+          scalarT);
+      
+      CounterChain chain = control.count.makeCounterChain();
+      DFEVar c = chain.addCounter(cp.C, 1).cast(dfeInt(32));
+      DFEVar f = constant.var(0).cast(dfeInt(32));
+      DFEVar h = chain.addCounter(cp.OH, 1).cast(dfeInt(32));
+      DFEVar w = chain.addCounter(cp.OW / cp.PK, 1).cast(dfeInt(32));
+      
+      DFEVar vld = (c.eq(cp.C - 1));
+      DFEVar addr = f * (cp.OH * cp.OW / cp.PK) + h * (cp.OW / cp.PK) + w;
+      addr = addr.cast(obuf.getAddrT());
+      DFEVar writeEn = constant.var(1).cast(dfeBool());
+      
+      debug.simPrintf("c = %d f = %d h = %d w = %d vld = %d\n", c, f, h, w, vld);
+      
+      io.output("dataOut", obuf.getPortVecT(), vld) <==
+        obuf.port(
+          io.input("dataIn", obuf.getPortVecT()),
+          addr,
+          writeEn);
+    }
+  }
+
+  public class TestData {
+
+    private final ConvLayerParameters cp;
+
+    long[]                            data, result;
+
+    TestData(ConvLayerParameters cp) {
+      this.cp = cp;
+
+      Random rand = new Random(42);
+
+      data = new long[cp.C * cp.PF * cp.OH * cp.OW];
+      for (int i = 0; i < data.length; i++)
+        data[i] = rand.nextInt() % 100;
+
+      result = new long[cp.PF * cp.OH * cp.OW];
+      for (int c = 0; c < cp.C; c++)
+        for (int i = 0; i < cp.PF * cp.OH * cp.OW; i++)
+          result[i] += data[c * cp.PF * cp.OH * cp.OW + i];
+    }
+
+    public List<Bits> getOutput() {
+      int M = cp.OH * cp.OW / cp.PK;
+      List<Bits> output = new ArrayList<Bits>(M);
+
+      for (int h = 0; h < cp.OH; h++) {
+        for (int w = 0; w < cp.OW; w += cp.PK) {
+          int idx = h * cp.OW / cp.PK + w / cp.PK;
+
+          long[] payload = new long[cp.PF * cp.PK];
+          for (int pf = 0; pf < cp.PF; pf++)
+            for (int pk = 0; pk < cp.PK; pk++)
+              payload[pf * cp.PK + pk] = result[pf * cp.OH * cp.OW + h * cp.OW
+                  + (w + pk)];
+
+          output.add(idx, ConvLayerDataUtils.pack(cp.BW, payload));
+        }
+      }
+
+      return output;
+    }
+
+    public List<Bits> getInput() {
+      int N = getNumCycles();
+
+      List<Bits> input = new ArrayList<Bits>(N);
+
+      for (int c = 0; c < cp.C; c++) {
+        for (int h = 0; h < cp.OH; h++) {
+          for (int w = 0; w < cp.OW; w += cp.PK) {
+            int idx = c * (cp.OH * cp.OW / cp.PK) + h * (cp.OW / cp.PK) + w
+                / cp.PK;
+            long[] payload = new long[cp.PF * cp.PK];
+
+            for (int pf = 0; pf < cp.PF; pf++)
+              for (int pk = 0; pk < cp.PK; pk++)
+                payload[pf * cp.PK + pk] = data[c * (cp.PF * cp.OH * cp.OW)
+                    + pf * (cp.OH * cp.OW) + h * cp.OW + (w + pk)];
+
+            input.add(idx, ConvLayerDataUtils.pack(cp.BW, payload));
+          }
+        }
+      }
+
+      return input;
+    }
+
+    /**
+     * 
+     * 
+     * @return
+     */
+    public int getNumCycles() {
+      return cp.C * cp.OH * (cp.OW / cp.PK);
+    }
+  }
+  
+  @Test public void test11() { test(1, 1); }
+  @Test public void test12() { test(1, 2); }
+  @Test public void test21() { test(2, 1); }
+  @Test public void test22() { test(2, 2); }
+
+  public void test(int PF, int PK) {
+    SimulationManager mgr = new SimulationManager(String.format(
+        "ConvLayerOfmapBufferTest_f%d_k%d", PF, PK));
+
+    ConvLayerParameters cp = new ConvLayerParameters.Builder(8, 8, 3, PF, 3)
+        .PK(PK).PF(PF).build();
+
+    TestKernel knl = new TestKernel(mgr.makeKernelParameters(), cp);
+    TestData data = new TestData(cp);
+
+    mgr.setKernel(knl);
+    mgr.setKernelCycles(data.getNumCycles());
+
+    mgr.setInputDataRaw("dataIn", data.getInput());
+    mgr.runTest();
+
+    Assert.assertArrayEquals(data.getOutput().toArray(), mgr.getOutputDataRawArray("dataOut"));
+  }
+}
